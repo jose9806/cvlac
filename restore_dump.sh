@@ -103,7 +103,7 @@ version: '3.8'
 
 services:
   postgres:
-    image: postgres:15
+    image: postgres:16
     container_name: $CONTAINER_NAME
     restart: always
     environment:
@@ -210,9 +210,9 @@ else
   docker exec $CONTAINER_NAME psql -U $PG_USER -c "CREATE DATABASE $DB_NAME;"
 fi
 
-# Determine dump file format
+# Determine dump file format - MODIFICACIÓN AQUÍ
 echo "Determining dump file format..."
-if grep -q "PostgreSQL custom database dump" "./dump/$DUMP_FILENAME" 2>/dev/null; then
+if file "./dump/$DUMP_FILENAME" | grep -q "PostgreSQL custom" || [[ "$DUMP_FILENAME" == *.dump ]]; then
   echo "Detected PostgreSQL custom format dump file."
   RESTORE_COMMAND="pg_restore -U $PG_USER -d $DB_NAME -v $CONTAINER_DUMP_PATH"
 else
