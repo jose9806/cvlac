@@ -1,52 +1,150 @@
+from config import ProjectLogger
 from psycopg2.extensions import AsIs
 from psycopg2 import connect
 from psycopg2.errors import UniqueViolation
 from datetime import datetime
 
+# Configuramos el logger para este módulo
+logger = ProjectLogger()
+module_logger = logger.get_logger(__name__)
 
+
+class ExtractorUtils:
+    """
+    Clase de utilidades para los extractores de CvLAC.
+    """
+
+    @staticmethod
+    def get_table(html, name_tag):
+        """
+        Obtiene una tabla a partir de una etiqueta de nombre.
+
+        Args:
+            html (BeautifulSoup): Documento HTML.
+            name_tag (dict): Diccionario con los atributos de la etiqueta de nombre.
+
+        Returns:
+            BeautifulSoup: Elemento de tabla encontrado o None.
+        """
+        try:
+            tag = html.find("a", name_tag)
+            return tag and tag.find_next_sibling("table")
+        except Exception as ex:
+            module_logger.error(f"Error en get_table: {str(ex)}", exc_info=True)
+            return None
+
+    @staticmethod
+    def get_text_next_tag(table, string, tag):
+        """
+        Obtiene el texto del siguiente elemento de la etiqueta especificada que contiene la cadena.
+
+        Args:
+            table (BeautifulSoup): Elemento de tabla.
+            string (str): Cadena a buscar.
+            tag (str): Nombre de la etiqueta a buscar.
+
+        Returns:
+            str: Texto encontrado o None.
+        """
+        try:
+            tag_search = table.find(string=string)
+            return tag_search and tag_search.find_next(tag).contents[0]
+        except Exception as ex:
+            module_logger.error(f"Error en get_text_next_tag: {str(ex)}", exc_info=True)
+            return None
+
+    @staticmethod
+    def get_href(table, string):
+        """
+        Obtiene el valor del atributo href de la etiqueta 'a' que contiene la cadena.
+
+        Args:
+            table (BeautifulSoup): Elemento de tabla.
+            string (str): Cadena a buscar.
+
+        Returns:
+            str: Valor del atributo href o None.
+        """
+        try:
+            a = table.find("a", text=string)
+            return a and a["href"]
+        except Exception as ex:
+            module_logger.error(f"Error en get_href: {str(ex)}", exc_info=True)
+            return None
+
+    @staticmethod
+    def delete_data(cod_rh, connection):
+        """
+        Elimina los datos de un investigador de la base de datos.
+
+        Args:
+            cod_rh (str): Código del investigador.
+            connection: Conexión a la base de datos.
+        """
+        try:
+            cursor = connection.cursor()
+            cursor.execute(
+                "delete from identificacion where cvlac_id = '{}'".format(cod_rh)
+            )
+            connection.commit()
+            module_logger.info(f"Datos eliminados para {cod_rh}")
+        except Exception as ex:
+            connection.rollback()
+            module_logger.error(
+                f"Error eliminando datos para {cod_rh}: {str(ex)}", exc_info=True
+            )
+
+    @staticmethod
+    def insert_data(table, dictionary, connection):
+        """
+        Inserta datos en una tabla de la base de datos.
+
+        Args:
+            table (str): Nombre de la tabla.
+            dictionary (dict): Diccionario con los datos a insertar.
+            connection: Conexión a la base de datos.
+        """
+        try:
+            columns = dictionary.keys()
+            values = dictionary.values()
+
+            insert_statement = "insert into {} ({}) values {}".format(
+                table, ",".join(columns), tuple(values)
+            )
+            cursor = connection.cursor()
+            cursor.execute(insert_statement)
+            connection.commit()
+            module_logger.debug(f"Datos insertados en tabla {table}")
+        except Exception as ex:
+            connection.rollback()
+            cvlac_id = dictionary.get("cvlac_id", "desconocido")
+            module_logger.error(
+                f"Error insertando datos para {cvlac_id} en tabla {table}: {str(ex)}",
+                exc_info=True,
+            )
+
+
+# Funciones de compatibilidad para el código existente
 def get_table(html, name_tag):
-    tag = html.find("a", name_tag)
-    return tag and tag.find_next_sibling("table")
+    """Función de compatibilidad para get_table"""
+    return ExtractorUtils.get_table(html, name_tag)
 
 
 def get_text_next_tag(table, string, tag):
-    tag_search = table.find(string=string)
-    return tag_search and tag_search.find_next(tag).contents[0]
+    """Función de compatibilidad para get_text_next_tag"""
+    return ExtractorUtils.get_text_next_tag(table, string, tag)
 
 
 def get_href(table, string):
-    a = table.find("a", text=string)
-    return a and a["href"]
+    """Función de compatibilidad para get_href"""
+    return ExtractorUtils.get_href(table, string)
 
 
 def delete_data(cod_rh, connection):
-    try:
-        cursor = connection.cursor()
-        cursor.execute(
-            "delete from identificacion where cvlac_id = '{}'".format(cod_rh)
-        )
-        connection.commit()
-    except:
-        connection.rollback()
+    """Función de compatibilidad para delete_data"""
+    return ExtractorUtils.delete_data(cod_rh, connection)
 
 
 def insert_data(table, dictionary, connection):
-    try:
-        columns = dictionary.keys()
-        values = dictionary.values()
-
-        insert_statement = "insert into {} ({}) values {}".format(
-            table, ",".join(columns), tuple(values)
-        )
-        cursor = connection.cursor()
-        cursor.execute(insert_statement)
-        connection.commit()
-    except Exception as ex:
-        connection.rollback()
-        f = open("logs.txt", "a")
-        if "cvlac_id" in dictionary:
-            f.write(
-                " -- ".join(
-                    [dictionary["cvlac_id"], str(datetime.now()), str(ex), table + "\n"]
-                )
-            )
+    """Función de compatibilidad para insert_data"""
+    return ExtractorUtils.insert_data(table, dictionary, connection)
