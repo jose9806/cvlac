@@ -6,9 +6,9 @@ Scraper principal para CvLAC.
 from bs4 import BeautifulSoup
 from urllib3.exceptions import InsecureRequestWarning
 from multiprocessing import Pool
-from psycopg2 import connect
 from config import ProjectLogger
-from extractors.utils import delete_data
+from extractors.utils import delete_data, start_extraction, finish_extraction
+from config import project_settings, db
 
 # Importar módulos de extracción específicos
 from extractors import (
@@ -119,24 +119,22 @@ class CvlacScraper:
         "Redes sociales académicas": redes_sociales.extract,
     }
 
-    def __init__(self, db_config=None):
+    def __init__(self):
         """
-        Inicializa el scraper con la configuración de base de datos.
-
-        Args:
-            db_config (dict, optional): Configuración de la base de datos.
+        Inicializa el scraper.
         """
-        self.db_config = db_config or {
-            "user": "postgres",
-            "password": "root",
-            "host": "",
-            "port": "5432",
-            "database": "scrap",
-        }
-
         # Cargar CVLACs ya procesados e intentados
         self.processed_ids = self._load_processed_ids()
         self.tried_ids = self._load_tried_ids()
+
+        # Configuración del scraper
+        self.scraper_config = project_settings.scraper
+
+        # Verificar conexión a BD al inicializar
+        if not db.test_connection():
+            main_logger.warning(
+                "Database connection failed. Some functionality may be limited."
+            )
 
     def _load_processed_ids(self):
         """
@@ -178,54 +176,53 @@ class CvlacScraper:
             )
             return tried
 
-    def _get_db_connection(self):
-        """
-        Obtiene una conexión a la base de datos.
-
-        Returns:
-            connection: Conexión a la base de datos.
-        """
-        try:
-            connection = connect(**self.db_config)
-            return connection
-        except Exception as ex:
-            main_logger.error(
-                f"Error conectando a la base de datos: {str(ex)}", exc_info=True
-            )
-            raise
-
     def extract_cvlac(self, cod_rh):
         """
         Extrae la información de un CvLAC.
 
         Args:
             cod_rh (str): Código del investigador.
+
+        Returns:
+            str: Ruta al reporte de extracción generado.
         """
         connection = None
+        report_path = None
         try:
             main_logger.info(f"Iniciando extracción para CvLAC: {cod_rh}")
 
+            # Iniciar nueva extracción para estadísticas
+            start_extraction()
+
             # Obtener conexión a la base de datos
-            connection = self._get_db_connection()
+            connection = db.get_connection()
 
             # Obtener la página CvLAC
             url = f"https://scienti.minciencias.gov.co/cvlac/visualizador/generarCurriculoCv.do?cod_rh={cod_rh}"
-            with requests.get(url, verify=False) as response:
+
+            headers = {"User-Agent": self.scraper_config.get("user_agent")}
+            timeout = self.scraper_config.get("timeout", 30)
+            verify_ssl = self.scraper_config.get("verify_ssl", False)
+
+            with requests.get(
+                url, headers=headers, timeout=timeout, verify=verify_ssl
+            ) as response:
                 if response.status_code != 200:
                     main_logger.warning(
                         f"Error al obtener CvLAC {cod_rh}. Status: {response.status_code}"
                     )
-                    return
+                    return None
 
                 html = BeautifulSoup(response.content, "lxml")
 
                 # Verificar si hay suficientes tablas
-                if len(html.findAll("table")) <= 2:
+                if len(html.findAll("table")) <= 2:  # type: ignore
                     main_logger.warning(f"CvLAC {cod_rh} no tiene suficientes tablas")
-                    return
+                    return None
 
-                # Eliminar datos previos
-                delete_data(cod_rh, connection)
+                # Eliminar datos previos si se está realizando una actualización completa
+                if self.scraper_config.get("remove_existing_data", True):
+                    delete_data(cod_rh, connection)
 
                 # Extraer identificación
                 nombre_completo = identificacion.extract(cod_rh, html, connection)
@@ -233,7 +230,7 @@ class CvlacScraper:
                     main_logger.warning(
                         f"No se pudo extraer identificación para CvLAC {cod_rh}"
                     )
-                    return
+                    return None
 
                 # Extraer el resto de secciones
                 for h3 in html.find_all("h3"):
@@ -266,7 +263,10 @@ class CvlacScraper:
                 f.write(str(cod_rh) + "\n")
             self.processed_ids.add(cod_rh)
 
+            # Generar reporte de extracción
+            report_path = finish_extraction(cod_rh)
             main_logger.info(f"Extracción completada para CvLAC: {cod_rh}")
+            main_logger.info(f"Reporte generado en: {report_path}")
 
         except Exception as ex:
             main_logger.error(
@@ -278,6 +278,8 @@ class CvlacScraper:
             if connection:
                 connection.close()
 
+        return report_path
+
     def process_range(self, start_id, range_size=31250):
         """
         Procesa un rango de IDs de CvLAC.
@@ -285,14 +287,19 @@ class CvlacScraper:
         Args:
             start_id (int): ID inicial.
             range_size (int, optional): Tamaño del rango. Por defecto 31250.
+
+        Returns:
+            list: Lista de rutas a los reportes generados
         """
         main_logger.info(
             f"Procesando rango desde {start_id} hasta {start_id + range_size - 1}"
         )
 
         connection = None
+        reports = []
+
         try:
-            connection = self._get_db_connection()
+            connection = db.get_connection()
 
             for i in range(start_id, start_id + range_size):
                 cod_rh_formatted = "{:010d}".format(i)
@@ -307,7 +314,33 @@ class CvlacScraper:
                 self.tried_ids.add(cod_rh_formatted)
 
                 # Extraer información
-                self.extract_cvlac(cod_rh_formatted)
+                report_path = self.extract_cvlac(cod_rh_formatted)
+                if report_path:
+                    reports.append(report_path)
+
+            # Generar reporte de resumen para todo el rango
+            if reports:
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                summary_file = os.path.join(
+                    "temp",
+                    "reports",
+                    f"range_summary_{start_id}_{start_id+range_size}_{timestamp}.txt",
+                )
+
+                with open(summary_file, "w") as f:
+                    f.write(
+                        f"Resumen de extracción para rango {start_id} - {start_id+range_size-1}\n"
+                    )
+                    f.write(
+                        f"Fecha de extracción: {datetime.datetime.now().isoformat()}\n"
+                    )
+                    f.write(f"Total de CVLACs procesados: {len(reports)}\n\n")
+                    f.write("Reportes individuales generados:\n")
+                    for report in reports:
+                        f.write(f"- {report}\n")
+
+                main_logger.info(f"Resumen del rango generado en: {summary_file}")
+                reports.append(summary_file)
 
         except Exception as ex:
             main_logger.error(f"Error en process_range: {str(ex)}", exc_info=True)
@@ -316,6 +349,8 @@ class CvlacScraper:
             if connection:
                 connection.close()
 
+        return reports
+
 
 def process_range_wrapper(start_id):
     """
@@ -323,12 +358,16 @@ def process_range_wrapper(start_id):
 
     Args:
         start_id (int): ID inicial.
+
+    Returns:
+        list: Lista de rutas a los reportes generados
     """
     try:
         scraper = CvlacScraper()
-        scraper.process_range(start_id)
+        return scraper.process_range(start_id)
     except Exception as ex:
         main_logger.error(f"Error en process_range_wrapper: {str(ex)}", exc_info=True)
+        return []
 
 
 def main():
@@ -362,38 +401,64 @@ def main():
         default=31250,
         help="Tamaño del paso para procesamiento en rango",
     )
-    parser.add_argument("--config", help="Ruta al archivo de configuración")
+    parser.add_argument(
+        "--test_db",
+        action="store_true",
+        help="Probar conexión a la base de datos y salir",
+    )
+    parser.add_argument(
+        "--update_only",
+        action="store_true",
+        help="Solo actualizar registros sin eliminar datos existentes",
+    )
+    parser.add_argument(
+        "--validate_only",
+        action="store_true",
+        help="Solo validar sin actualizar ni insertar nuevos registros",
+    )
+    parser.add_argument(
+        "--report_dir",
+        help="Directorio para almacenar los reportes de extracción",
+    )
 
     args = parser.parse_args()
 
-    # Configuración de la base de datos desde archivo o valores por defecto
-    db_config = {
-        "user": "postgres",
-        "password": "root",
-        "host": "",
-        "port": "5432",
-        "database": "scrap",
-    }
+    # Actualizar configuración basada en argumentos de línea de comandos
+    if args.update_only:
+        project_settings.scraper["remove_existing_data"] = False
 
-    # Intentar cargar configuración desde archivo
-    try:
-        if args.config and os.path.exists(args.config):
-            with open(args.config, "r") as f:
-                db_config.update(json.load(f))
-        elif os.path.exists("db_config.json"):
-            with open("db_config.json", "r") as f:
-                db_config.update(json.load(f))
-    except Exception as ex:
-        main_logger.error(
-            f"Error cargando configuración de BD: {str(ex)}", exc_info=True
-        )
+    if args.validate_only:
+        project_settings.scraper["update_if_exists"] = False
 
-    scraper = CvlacScraper(db_config)
+    if args.report_dir:
+        # Asegurarse de que el directorio de reportes exista
+        os.makedirs(args.report_dir, exist_ok=True)
+        # Actualizar la ruta del directorio de reportes en la configuración
+        if not hasattr(project_settings, "_config"):
+            project_settings._config = {}
+        if "reporting" not in project_settings._config:
+            project_settings._config["reporting"] = {}
+        project_settings._config["reporting"]["report_dir"] = args.report_dir
+
+    # Probar la conexión a la base de datos si se solicita
+    if args.test_db:
+        print("Probando conexión a la base de datos...")
+        if db.test_connection():
+            print("✅ Conexión exitosa a la base de datos")
+        else:
+            print("❌ No se pudo conectar a la base de datos")
+        return
+
+    scraper = CvlacScraper()
+    all_reports = []
 
     # Modo de ejecución: un solo CvLAC
     if args.cod_rh:
         main_logger.info(f"Extrayendo información para CvLAC: {args.cod_rh}")
-        scraper.extract_cvlac(args.cod_rh)
+        report_path = scraper.extract_cvlac(args.cod_rh)
+        if report_path:
+            all_reports.append(report_path)
+            main_logger.info(f"Reporte generado: {report_path}")
 
     # Modo de ejecución: multiprocesamiento
     elif args.multiprocess:
@@ -403,17 +468,44 @@ def main():
 
         if args.workers > 1:
             with Pool(args.workers) as pool:
-                pool.map(process_range_wrapper, parts)
+                results = pool.map(process_range_wrapper, parts)
+                # Aplanar la lista de resultados
+                for reports in results:
+                    if reports:
+                        all_reports.extend(reports)
         else:
             for start_id in parts:
-                process_range_wrapper(start_id)
+                reports = process_range_wrapper(start_id)
+                if reports:
+                    all_reports.extend(reports)
 
     # Modo por defecto: un solo proceso, todos los rangos
     else:
         main_logger.info("Iniciando extracción en modo single-process")
 
         for start_id in range(args.range_start, args.range_end, args.step):
-            scraper.process_range(start_id, args.step)
+            reports = scraper.process_range(start_id, args.step)
+            if reports:
+                all_reports.extend(reports)
+
+    # Generar un reporte final con todos los resultados
+    if all_reports:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        final_report = os.path.join(
+            "temp", "reports", f"extraccion_completa_{timestamp}.txt"
+        )
+
+        with open(final_report, "w") as f:
+            f.write(f"REPORTE FINAL DE EXTRACCIÓN\n")
+            f.write(f"=========================\n\n")
+            f.write(f"Fecha de finalización: {datetime.datetime.now().isoformat()}\n")
+            f.write(f"Total de reportes generados: {len(all_reports)}\n\n")
+            f.write("Reportes individuales:\n")
+            for report in all_reports:
+                f.write(f"- {report}\n")
+
+        main_logger.info(f"Reporte final generado en: {final_report}")
+        print(f"Extracción completada. Reporte final: {final_report}")
 
 
 if __name__ == "__main__":

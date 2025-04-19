@@ -64,7 +64,7 @@ class ProduccionBibliograficaExtractor:
                         )
 
                     # Insertar en la base de datos
-                    insert_data("articulos", data, connection)
+                    insert_data("articulos_publicados", data, connection)
                     module_logger.debug(f"Artículo insertado para {cod_rh}")
                 except Exception as ex:
                     module_logger.error(

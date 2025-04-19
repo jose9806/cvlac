@@ -172,7 +172,7 @@ class ActividadesFormacion:
 
             for i in range(len(lis)):
                 try:
-                    data = {"cvlac_id": cod_rh}
+                    data = {"nro": cod_rh}
 
                     # Extraer información del elemento li
                     data["chulo"] = "SI" if lis[i].find("img") else "NO"

@@ -1,12 +1,13 @@
 from config import ProjectLogger
-from psycopg2.extensions import AsIs
-from psycopg2 import connect
-from psycopg2.errors import UniqueViolation
-from datetime import datetime
+from validators import DataValidator
+from config import db
 
 # Configuramos el logger para este módulo
 logger = ProjectLogger()
 module_logger = logger.get_logger(__name__)
+
+# Inicializar el validador como una variable global
+data_validator = DataValidator(db)
 
 
 class ExtractorUtils:
@@ -95,26 +96,40 @@ class ExtractorUtils:
             )
 
     @staticmethod
-    def insert_data(table, dictionary, connection):
+    def insert_data(table, dictionary, connection, update_if_exists=True):
         """
-        Inserta datos en una tabla de la base de datos.
+        Inserta datos en una tabla de la base de datos, validando duplicados.
 
         Args:
             table (str): Nombre de la tabla.
             dictionary (dict): Diccionario con los datos a insertar.
             connection: Conexión a la base de datos.
+            update_if_exists (bool, optional): Si es True, actualiza registros
+                                              existentes. Por defecto es True.
+
+        Returns:
+            str: Operación realizada ('insert', 'update', 'skip', 'error')
         """
         try:
-            columns = dictionary.keys()
-            values = dictionary.values()
-
-            insert_statement = "insert into {} ({}) values {}".format(
-                table, ",".join(columns), tuple(values)
+            # Usar el validador para insertar o actualizar evitando duplicados
+            operation, error = data_validator.insert_or_update(
+                table, dictionary, connection, update_if_exists
             )
-            cursor = connection.cursor()
-            cursor.execute(insert_statement)
-            connection.commit()
-            module_logger.debug(f"Datos insertados en tabla {table}")
+
+            if operation == "insert":
+                module_logger.debug(f"Insertado nuevo registro en tabla {table}")
+            elif operation == "update":
+                module_logger.debug(f"Actualizado registro existente en tabla {table}")
+            elif operation == "skip":
+                module_logger.debug(f"Omitido registro duplicado en tabla {table}")
+            else:  # error
+                cvlac_id = dictionary.get("cvlac_id", "desconocido")
+                module_logger.error(
+                    f"Error insertando datos para {cvlac_id} en tabla {table}: {error}"
+                )
+
+            return operation
+
         except Exception as ex:
             connection.rollback()
             cvlac_id = dictionary.get("cvlac_id", "desconocido")
@@ -122,6 +137,31 @@ class ExtractorUtils:
                 f"Error insertando datos para {cvlac_id} en tabla {table}: {str(ex)}",
                 exc_info=True,
             )
+            data_validator.record_operation(table, "error", dictionary, error=str(ex))
+            return "error"
+
+    @staticmethod
+    def start_extraction():
+        """
+        Inicia una nueva extracción, reiniciando estadísticas.
+
+        Returns:
+            dict: Estadísticas iniciales de la extracción
+        """
+        return data_validator.start_new_extraction()
+
+    @staticmethod
+    def finish_extraction(cod_rh=None):
+        """
+        Finaliza la extracción y genera un reporte.
+
+        Args:
+            cod_rh (str, optional): Código del investigador específico.
+
+        Returns:
+            str: Ruta al archivo de reporte generado.
+        """
+        return data_validator.finish_extraction(cod_rh)
 
 
 # Funciones de compatibilidad para el código existente
@@ -148,3 +188,13 @@ def delete_data(cod_rh, connection):
 def insert_data(table, dictionary, connection):
     """Función de compatibilidad para insert_data"""
     return ExtractorUtils.insert_data(table, dictionary, connection)
+
+
+def start_extraction():
+    """Función de compatibilidad para start_extraction"""
+    return ExtractorUtils.start_extraction()
+
+
+def finish_extraction(cod_rh=None):
+    """Función de compatibilidad para finish_extraction"""
+    return ExtractorUtils.finish_extraction(cod_rh)
