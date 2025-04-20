@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 from urllib3.exceptions import InsecureRequestWarning
 from multiprocessing import Pool
 from config import ProjectLogger
-from extractors.utils import delete_data, start_extraction, finish_extraction
+from extractors.utils import delete_data
 from config import project_settings, db
 
 # Importar módulos de extracción específicos
@@ -398,6 +398,11 @@ def process_range_wrapper(start_id):
 def main():
     """Función principal."""
     parser = argparse.ArgumentParser(description="Extraer información de CvLAC")
+    parser.add_argument(
+        "--enhanced-reports",
+        action="store_true",
+        help="Generate enhanced visual reports with additional analytics",
+    )
     parser.add_argument("--cod_rh", help="Código CvLAC del investigador")
     parser.add_argument(
         "--multiprocess", action="store_true", help="Usar multiprocesamiento"
@@ -492,6 +497,30 @@ def main():
     all_reports = []
 
     try:
+        if args.enhanced_reports:
+            main_logger.info("Generating enhanced reports...")
+
+            if not session_id:
+                session_id = (
+                    f"session_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                )
+                validator.start_new_extraction(session_id)
+
+            report_paths = validator.generate_enhanced_reports(
+                formats=["html", "json", "csv"]
+            )
+
+            if report_paths:
+                main_logger.info("Enhanced reports generated:")
+                for format_type, path in report_paths.items():
+                    if isinstance(path, dict):
+                        main_logger.info(f"  {format_type} reports:")
+                        for sub_type, sub_path in path.items():
+                            main_logger.info(f"    - {sub_type}: {sub_path}")
+                    else:
+                        main_logger.info(f"  {format_type}: {path}")
+            else:
+                main_logger.warning("Failed to generate enhanced reports")
         # Modo de ejecución: un solo CvLAC
         if args.cod_rh:
             main_logger.info(f"Extrayendo información para CvLAC: {args.cod_rh}")

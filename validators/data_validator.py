@@ -3,10 +3,12 @@ Módulo para validación de datos y manejo de duplicados.
 """
 
 import json
-import csv
 import logging
 from datetime import datetime
+import os
 from pathlib import Path
+from reporting import EnhancedReporting
+
 
 # Configuramos el logger para este módulo
 logging.basicConfig(level=logging.INFO)
@@ -544,6 +546,80 @@ class DataValidator:
             self.record_operation(table, "error", data, error=str(e))
             return "error", error_msg
 
+    def generate_enhanced_reports(self, cod_rh=None, formats=None):
+        """
+        Generates enhanced reports for the extraction.
+
+        Args:
+            cod_rh (str, optional): Specific CvLAC ID to report on
+            formats (list, optional): Report formats to generate ['html', 'json', 'csv']
+                                    Default is ['html', 'json']
+
+        Returns:
+            dict: Paths to the generated reports
+        """
+        if not hasattr(self, "current_session_id") or not self.session_file.exists():  # type: ignore
+            module_logger.warning("No active session found for reporting")
+            return None
+
+        if formats is None:
+            formats = ["html", "json"]
+
+        # Load session data
+        try:
+            with open(self.session_file, "r", encoding="utf-8") as f:  # type: ignore
+                session_data = json.load(f)
+        except Exception as e:
+            module_logger.error(f"Error loading session data: {str(e)}")
+            return None
+
+        # Filter for specific CvLAC if requested
+        if cod_rh:
+            filtered_session = session_data.copy()
+            filtered_session["processing_history"] = [
+                entry
+                for entry in session_data.get("processing_history", [])
+                if entry.get("cvlac_id") == cod_rh
+            ]
+            filtered_session["errors"] = [
+                error
+                for error in session_data.get("errors", [])
+                if error.get("data", {}).get("cvlac_id") == cod_rh
+            ]
+            session_data = filtered_session
+
+        # Initialize enhanced reporting
+        enhanced_reporting = EnhancedReporting(
+            base_dir=os.path.join(str(self.report_dir), "enhanced")
+        )
+
+        # Generate requested report formats
+        report_paths = {}
+
+        try:
+            if "html" in formats:
+                html_path = enhanced_reporting.generate_html_report(session_data)
+                report_paths["html"] = html_path
+
+            if "json" in formats:
+                # Analyze data once and reuse
+                enhanced_data = enhanced_reporting.analyze_session_data(session_data)
+                json_path = enhanced_reporting.generate_json_report(
+                    session_data, enhanced_data=enhanced_data
+                )
+                report_paths["json"] = json_path
+
+            if "csv" in formats:
+                csv_paths = enhanced_reporting.generate_csv_report(session_data)
+                report_paths["csv"] = csv_paths
+
+        except Exception as e:
+            module_logger.error(
+                f"Error generating enhanced reports: {str(e)}", exc_info=True
+            )
+
+        return report_paths
+
     def finish_extraction(self, cod_rh=None):
         """
         Finaliza la extracción y actualiza el reporte de sesión.
@@ -552,10 +628,12 @@ class DataValidator:
             cod_rh (str, optional): Código del investigador específico.
 
         Returns:
-            str: Ruta al archivo de reporte de sesión.
+            dict: Rutas a los archivos de reporte generados.
         """
         success = len(self.extraction_stats["errors"]) == 0
         self.record_extraction_result(cod_rh, success=success)
+
+        reports = {}
 
         # Only generate individual reports for failures if needed
         if not success and cod_rh:
@@ -570,16 +648,22 @@ class DataValidator:
                 f"Error en la extracción para {cod_rh}. Detalles en: {error_file}"
             )
 
-        return str(self.session_file)
+            reports["error_report"] = str(error_file)
 
+        # Add basic session file path to reports
+        reports["session_file"] = str(self.session_file)
+
+        return reports
+
+    # Update finish_session method
     def finish_session(self):
         """
         Finalizes the session and generates summary reports.
 
         Returns:
-            tuple: Paths to summary report files
+            dict: Paths to summary report files
         """
-        if not hasattr(self, "current_session_id") or not self.session_file.exists(): # type: ignore
+        if not hasattr(self, "current_session_id") or not self.session_file.exists():  # type: ignore
             return None
 
         # Load session data
@@ -601,24 +685,17 @@ class DataValidator:
         with open(self.session_file, "w", encoding="utf-8") as f:  # type: ignore
             json.dump(session_data, f, indent=2, ensure_ascii=False)
 
-        # Create CSV summary
-        csv_file = self.report_dir / f"summary_{self.current_session_id}.csv"
-        with open(csv_file, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                ["Tabla", "Inserciones", "Actualizaciones", "Omitidos", "Errores"]
+        # Create enhanced reports
+        report_paths = {"session_json": str(self.session_file)}
+
+        try:
+            enhanced_reports = self.generate_enhanced_reports(formats=["html", "json"])
+            if enhanced_reports:
+                report_paths.update(enhanced_reports)
+        except Exception as e:
+            module_logger.error(
+                f"Error in enhanced reports during finish_session: {str(e)}",
+                exc_info=True,
             )
 
-            for table, stats in session_data["table_stats"].items():
-                writer.writerow(
-                    [
-                        table,
-                        stats["inserts"],
-                        stats["updates"],
-                        stats["skips"],
-                        stats["errors"],
-                    ]
-                )
-
-        # Return paths to report files
-        return str(self.session_file), str(csv_file)
+        return report_paths
