@@ -38,10 +38,162 @@ class DataValidator:
             "errors": [],
         }
 
+        # Validar el esquema de la base de datos al inicializar
+        try:
+            self.validate_database_schema(
+                ["eventos_cientificos", "proyectos", "identificacion"]
+            )
+        except Exception as e:
+            module_logger.error(f"Error validando esquema de base de datos: {str(e)}")
+
     def _ensure_dirs_exist(self):
         """Asegura que los directorios necesarios existan."""
         self.temp_dir.mkdir(exist_ok=True)
         self.report_dir.mkdir(exist_ok=True)
+
+    def validate_database_schema(self, tables_to_check=None):
+        """
+        Valida que las tablas y columnas necesarias existan en la base de datos.
+
+        Args:
+            tables_to_check (list): Lista de tablas a verificar. Si es None, verifica todas.
+
+        Returns:
+            dict: Reporte de estado de las tablas y columnas.
+        """
+        report = {
+            "tables_checked": 0,
+            "tables_missing": 0,
+            "tables_with_issues": 0,
+            "details": {},
+        }
+
+        try:
+            with self.db.get_connection_context() as connection:
+                cursor = connection.cursor()
+
+                # Obtener lista de tablas a verificar
+                if tables_to_check is None:
+                    cursor.execute(
+                        """
+                        SELECT table_name 
+                        FROM information_schema.tables 
+                        WHERE table_schema = 'public'
+                    """
+                    )
+                    tables_to_check = [row[0] for row in cursor.fetchall()]
+
+                for table in tables_to_check:
+                    report["tables_checked"] += 1
+                    report["details"][table] = {
+                        "exists": False,
+                        "columns": {},
+                        "issues": [],
+                    }
+
+                    # Verificar si la tabla existe
+                    cursor.execute(
+                        """
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.tables 
+                            WHERE table_schema = 'public' 
+                            AND table_name = %s
+                        )
+                    """,
+                        (table,),
+                    )
+
+                    table_exists = cursor.fetchone()[0]
+                    report["details"][table]["exists"] = table_exists
+
+                    if not table_exists:
+                        report["tables_missing"] += 1
+                        report["details"][table]["issues"].append(
+                            "Table does not exist"
+                        )
+                        continue
+
+                    # Verificar columnas
+                    cursor.execute(
+                        """
+                        SELECT column_name, data_type 
+                        FROM information_schema.columns 
+                        WHERE table_schema = 'public' 
+                        AND table_name = %s
+                    """,
+                        (table,),
+                    )
+
+                    columns = {row[0]: row[1] for row in cursor.fetchall()}
+                    report["details"][table]["columns"] = columns
+
+                    # Verificar si existe la columna cvlac_id
+                    if "cvlac_id" not in columns:
+                        report["tables_with_issues"] += 1
+                        report["details"][table]["issues"].append(
+                            "Missing 'cvlac_id' column"
+                        )
+
+                # Mostrar informe en el log
+                for table, info in report["details"].items():
+                    if info["exists"]:
+                        if len(info["issues"]) > 0:
+                            module_logger.warning(
+                                f"Tabla '{table}' existe pero tiene problemas: {', '.join(info['issues'])}"
+                            )
+                            module_logger.warning(
+                                f"Columnas en '{table}': {list(info['columns'].keys())}"
+                            )
+                        else:
+                            module_logger.info(
+                                f"Tabla '{table}' verificada correctamente"
+                            )
+                    else:
+                        module_logger.error(
+                            f"Tabla '{table}' no existe en la base de datos"
+                        )
+
+                return report
+
+        except Exception as e:
+            module_logger.error(
+                f"Error validando esquema de la base de datos: {str(e)}"
+            )
+            report["error"] = str(e)
+            return report
+
+    def check_column_exists(self, table, column):
+        """
+        Verifica si una columna existe en una tabla.
+
+        Args:
+            table (str): Nombre de la tabla.
+            column (str): Nombre de la columna.
+
+        Returns:
+            bool: True si la columna existe, False en caso contrario.
+        """
+        try:
+            with self.db.get_connection_context() as connection:
+                cursor = connection.cursor()
+                cursor.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.columns 
+                        WHERE table_schema = 'public' 
+                        AND table_name = %s 
+                        AND column_name = %s
+                    )
+                """,
+                    (table, column),
+                )
+
+                return cursor.fetchone()[0]
+        except Exception as e:
+            module_logger.error(
+                f"Error verificando columna {column} en {table}: {str(e)}"
+            )
+            return False
 
     def check_duplicate(self, table, data, key_columns=None):
         """
@@ -57,6 +209,13 @@ class DataValidator:
             tuple: (bool, dict) - (Es duplicado, Registro existente si lo hay)
         """
         try:
+            # Verificar primero si la columna cvlac_id existe en la tabla
+            if "cvlac_id" in data and not self.check_column_exists(table, "cvlac_id"):
+                module_logger.warning(
+                    f"La columna 'cvlac_id' no existe en la tabla {table}. Verificar si el esquema es correcto."
+                )
+                return False, None
+
             # Si no se especifican columnas clave, usar cvlac_id más otras claves candidatas
             if key_columns is None:
                 # Intentar obtener información de las claves primarias
@@ -64,6 +223,21 @@ class DataValidator:
                 # Si no se puede, usar solo cvlac_id como clave
                 if not key_columns or len(key_columns) == 0:
                     key_columns = ["cvlac_id"]
+
+            # Verificar que las columnas clave existan en la tabla
+            for col in key_columns[:]:
+                if not self.check_column_exists(table, col):
+                    module_logger.warning(
+                        f"La columna '{col}' no existe en la tabla {table}. Omitiendo esta columna."
+                    )
+                    key_columns.remove(col)
+
+            # Si no quedan columnas válidas, no podemos verificar duplicados
+            if not key_columns:
+                module_logger.warning(
+                    f"No se encontraron columnas válidas para verificar duplicados en {table}"
+                )
+                return False, None
 
             # Construir la consulta
             conditions = []
@@ -79,7 +253,7 @@ class DataValidator:
                 return False, None
 
             # Construir la consulta SQL
-            query = f"SELECT * FROM {table} WHERE {' AND '.join(conditions)}"
+            query = f"SELECT * FROM public.{table} WHERE {' AND '.join(conditions)}"
 
             # Ejecutar la consulta
             with self.db.get_connection_context() as connection:
@@ -188,6 +362,21 @@ class DataValidator:
             tuple: (operación realizada, error si ocurrió)
         """
         try:
+            # Verificar primero que las columnas existan en la tabla
+            for column in list(data.keys()):
+                if not self.check_column_exists(table, column):
+                    module_logger.warning(
+                        f"La columna '{column}' no existe en la tabla {table}. Eliminando del conjunto de datos."
+                    )
+                    del data[column]
+
+            # Si no quedan datos después de la verificación, no podemos hacer nada
+            if not data:
+                error_msg = f"No hay columnas válidas para insertar en {table}"
+                module_logger.error(error_msg)
+                self.record_operation(table, "error", data=None, error=error_msg)
+                return "error", error_msg
+
             # Verificar si el registro ya existe
             is_duplicate, existing_record = self.check_duplicate(
                 table, data, key_columns
@@ -216,7 +405,7 @@ class DataValidator:
 
                     # Ejecutar actualización si hay columnas para actualizar
                     if update_columns and where_conditions:
-                        update_query = f"UPDATE {table} SET {', '.join([f'{col} = %s' for col in update_columns])} WHERE {' AND '.join(where_conditions)}"
+                        update_query = f"UPDATE public.{table} SET {', '.join([f'{col} = %s' for col in update_columns])} WHERE {' AND '.join(where_conditions)}"
                         cursor = connection.cursor()
                         cursor.execute(update_query, update_values + where_values)
                         connection.commit()
@@ -235,7 +424,7 @@ class DataValidator:
                 values = list(data.values())
 
                 placeholders = ", ".join(["%s"] * len(values))
-                insert_query = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})"
+                insert_query = f"INSERT INTO public.{table} ({', '.join(columns)}) VALUES ({placeholders})"
 
                 cursor = connection.cursor()
                 cursor.execute(insert_query, values)

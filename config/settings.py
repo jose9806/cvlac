@@ -17,7 +17,7 @@ DEFAULT_CONFIG = {
         "password": os.getenv("DB_PASSWORD", "postgres"),
         "host": os.getenv("DB_HOST", "localhost"),
         "port": os.getenv("DB_PORT", "5432"),
-        "database": os.getenv("DB_NAME", "scrap"),
+        "database": os.getenv("DB_NAME", "cvlac_db"),
     },
     "logging": {
         "level": os.getenv("LOG_LEVEL", "INFO"),

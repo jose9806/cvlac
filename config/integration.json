@@ -1,0 +1,16 @@
+{
+  "cvlac_db": {
+    "host": "localhost",
+    "port": 5432,
+    "database": "cvlac_db",
+    "user": "postgres",
+    "password": "postgres"
+  },
+  "gruplac_db": {
+    "host": "localhost",
+    "port": 5432,
+    "database": "scrap_db",
+    "user": "postgres",
+    "password": "postgres"
+  }
+}

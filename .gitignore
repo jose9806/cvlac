@@ -175,3 +175,5 @@ cython_debug/
 dump/
 temp/
 procesados.txt
+create_db.sql
+cvlac_id_tries.txt
