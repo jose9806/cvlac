@@ -224,10 +224,14 @@ class ProduccionBibliograficaExtractor:
                     )
 
                     # Verificar que haya suficientes elementos
-                    if len(blockquote_split) > 6:
+                    if len(blockquote_split) > 6 and blockquote_split[6] is not None:
                         tipo_split = blockquote_split[6].split("\n")
                         if tipo_split:
                             data["tipo"] = tipo_split[0]
+                    else:
+                        module_logger.debug(
+                            f"No se encontró información de tipo en blockquote_split[6] para capítulo de libro"
+                        )
 
                     ProduccionBibliograficaExtractor._extract_blockquote_capitulos(
                         blockquote_split, data

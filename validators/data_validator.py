@@ -4,13 +4,13 @@ Módulo para validación de datos y manejo de duplicados.
 
 import json
 import csv
+import logging
 from datetime import datetime
 from pathlib import Path
-from config import ProjectLogger
 
 # Configuramos el logger para este módulo
-logger = ProjectLogger()
-module_logger = logger.get_logger(__name__)
+logging.basicConfig(level=logging.INFO)
+module_logger = logging.getLogger(__name__)
 
 
 class DataValidator:
@@ -30,10 +30,13 @@ class DataValidator:
         self.report_dir = self.temp_dir / "reports"
         self._ensure_dirs_exist()
 
+        # Inicializar variables para sesión actual
+        self.current_session_id = None
+        self.session_file = None
+
         # Estadísticas de la extracción actual
         self.extraction_stats = {
             "started_at": datetime.now().isoformat(),
-            "cvlacs_processed": 0,
             "tables": {},
             "errors": [],
         }
@@ -41,7 +44,7 @@ class DataValidator:
         # Validar el esquema de la base de datos al inicializar
         try:
             self.validate_database_schema(
-                ["eventos_cientificos", "proyectos", "identificacion"]
+                ["identificacion", "eventos_cientificos", "proyectos"]
             )
         except Exception as e:
             module_logger.error(f"Error validando esquema de base de datos: {str(e)}")
@@ -141,11 +144,11 @@ class DataValidator:
                             module_logger.warning(
                                 f"Tabla '{table}' existe pero tiene problemas: {', '.join(info['issues'])}"
                             )
-                            module_logger.warning(
+                            module_logger.debug(
                                 f"Columnas en '{table}': {list(info['columns'].keys())}"
                             )
                         else:
-                            module_logger.info(
+                            module_logger.debug(
                                 f"Tabla '{table}' verificada correctamente"
                             )
                     else:
@@ -307,6 +310,48 @@ class DataValidator:
             )
             return ["cvlac_id"]  # Default en caso de error
 
+    def start_new_extraction(self, session_id=None):
+        """
+        Inicia una nueva extracción, con identificador de sesión opcional.
+
+        Args:
+            session_id (str, optional): ID de la sesión de extracción.
+
+        Returns:
+            dict: Estadísticas iniciales
+        """
+        # Create session ID if none provided (timestamp-based)
+        if not session_id:
+            session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+        self.current_session_id = session_id
+
+        # Initialize session stats file if it doesn't exist
+        self.session_file = self.report_dir / f"session_{session_id}.json"
+
+        if not self.session_file.exists():
+            session_data = {
+                "session_id": session_id,
+                "started_at": datetime.now().isoformat(),
+                "cvlacs_processed": 0,
+                "success_count": 0,
+                "error_count": 0,
+                "table_stats": {},
+                "processing_history": [],
+                "errors": [],
+            }
+            with open(self.session_file, "w", encoding="utf-8") as f:
+                json.dump(session_data, f, indent=2, ensure_ascii=False)
+
+        # Reset extraction stats for this ID
+        self.extraction_stats = {
+            "started_at": datetime.now().isoformat(),
+            "tables": {},
+            "errors": [],
+        }
+
+        return self.extraction_stats
+
     def record_operation(
         self, table, operation, data=None, existing_record=None, error=None
     ):
@@ -344,6 +389,66 @@ class DataValidator:
                     "timestamp": datetime.now().isoformat(),
                 }
             )
+
+    def record_extraction_result(self, cod_rh, success=True, error=None):
+        """
+        Records the result of an extraction to the session file.
+
+        Args:
+            cod_rh (str): CvLAC ID processed
+            success (bool): Whether the extraction was successful
+            error (str, optional): Error message if extraction failed
+        """
+        if not hasattr(self, "current_session_id") or not self.session_file.exists():  # type: ignore
+            self.start_new_extraction()
+
+        # Load current session data
+        with open(self.session_file, "r", encoding="utf-8") as f:  # type: ignore
+            session_data = json.load(f)
+
+        # Update session stats
+        session_data["cvlacs_processed"] += 1
+        if success:
+            session_data["success_count"] += 1
+        else:
+            session_data["error_count"] += 1
+
+        # Update table stats
+        for table, stats in self.extraction_stats["tables"].items():
+            if table not in session_data["table_stats"]:
+                session_data["table_stats"][table] = {
+                    "inserts": 0,
+                    "updates": 0,
+                    "skips": 0,
+                    "errors": 0,
+                }
+
+            for op in ["inserts", "updates", "skips", "errors"]:
+                session_data["table_stats"][table][op] += stats.get(op, 0)
+
+        # Add to processing history
+        extraction_summary = {
+            "cvlac_id": cod_rh,
+            "processed_at": datetime.now().isoformat(),
+            "success": success,
+            "processing_time": (
+                datetime.now()
+                - datetime.fromisoformat(self.extraction_stats["started_at"])
+            ).total_seconds(),
+        }
+
+        if not success and error:
+            extraction_summary["error"] = error
+
+        session_data["processing_history"].append(extraction_summary)
+
+        # Add detailed errors if any
+        if self.extraction_stats["errors"]:
+            session_data["errors"].extend(self.extraction_stats["errors"])
+
+        # Write updated session data
+        with open(self.session_file, "w", encoding="utf-8") as f:  # type: ignore
+            json.dump(session_data, f, indent=2, ensure_ascii=False)
 
     def insert_or_update(
         self, table, data, connection, update_if_exists=True, key_columns=None
@@ -441,38 +546,70 @@ class DataValidator:
 
     def finish_extraction(self, cod_rh=None):
         """
-        Finaliza la extracción y genera un reporte.
+        Finaliza la extracción y actualiza el reporte de sesión.
 
         Args:
             cod_rh (str, optional): Código del investigador específico.
 
         Returns:
-            str: Ruta al archivo de reporte generado.
+            str: Ruta al archivo de reporte de sesión.
         """
-        # Completar estadísticas
-        self.extraction_stats["ended_at"] = datetime.now().isoformat()
-        self.extraction_stats["cvlacs_processed"] += 1
+        success = len(self.extraction_stats["errors"]) == 0
+        self.record_extraction_result(cod_rh, success=success)
 
-        # Crear nombre de archivo para el reporte
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename_suffix = f"_{cod_rh}" if cod_rh else ""
-        report_file = (
-            self.report_dir / f"extraction_report{filename_suffix}_{timestamp}.json"
-        )
+        # Only generate individual reports for failures if needed
+        if not success and cod_rh:
+            # Save individual error report for debugging
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            error_file = self.report_dir / f"error_{cod_rh}_{timestamp}.json"
 
-        # Guardar reporte en formato JSON
-        with open(report_file, "w", encoding="utf-8") as f:
-            json.dump(self.extraction_stats, f, indent=2, ensure_ascii=False)
+            with open(error_file, "w", encoding="utf-8") as f:
+                json.dump(self.extraction_stats, f, indent=2, ensure_ascii=False)
 
-        # Crear reporte CSV para estadísticas por tabla
-        csv_file = self.report_dir / f"table_stats{filename_suffix}_{timestamp}.csv"
+            module_logger.warning(
+                f"Error en la extracción para {cod_rh}. Detalles en: {error_file}"
+            )
+
+        return str(self.session_file)
+
+    def finish_session(self):
+        """
+        Finalizes the session and generates summary reports.
+
+        Returns:
+            tuple: Paths to summary report files
+        """
+        if not hasattr(self, "current_session_id") or not self.session_file.exists(): # type: ignore
+            return None
+
+        # Load session data
+        with open(self.session_file, "r", encoding="utf-8") as f:  # type: ignore
+            session_data = json.load(f)
+
+        # Update end time
+        session_data["ended_at"] = datetime.now().isoformat()
+        session_data["total_duration"] = (
+            datetime.now() - datetime.fromisoformat(session_data["started_at"])
+        ).total_seconds()
+
+        # Calculate success rate
+        total = session_data["cvlacs_processed"]
+        if total > 0:
+            session_data["success_rate"] = (session_data["success_count"] / total) * 100
+
+        # Write final session data
+        with open(self.session_file, "w", encoding="utf-8") as f:  # type: ignore
+            json.dump(session_data, f, indent=2, ensure_ascii=False)
+
+        # Create CSV summary
+        csv_file = self.report_dir / f"summary_{self.current_session_id}.csv"
         with open(csv_file, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(
                 ["Tabla", "Inserciones", "Actualizaciones", "Omitidos", "Errores"]
             )
 
-            for table, stats in self.extraction_stats["tables"].items():
+            for table, stats in session_data["table_stats"].items():
                 writer.writerow(
                     [
                         table,
@@ -483,23 +620,5 @@ class DataValidator:
                     ]
                 )
 
-        # Crear reporte de errores si hay alguno
-        if self.extraction_stats["errors"]:
-            error_file = self.report_dir / f"errors{filename_suffix}_{timestamp}.json"
-            with open(error_file, "w", encoding="utf-8") as f:
-                json.dump(
-                    self.extraction_stats["errors"], f, indent=2, ensure_ascii=False
-                )
-
-        module_logger.info(f"Reporte de extracción generado: {report_file}")
-        return str(report_file)
-
-    def start_new_extraction(self):
-        """Inicia una nueva extracción, reiniciando las estadísticas."""
-        self.extraction_stats = {
-            "started_at": datetime.now().isoformat(),
-            "cvlacs_processed": 0,
-            "tables": {},
-            "errors": [],
-        }
-        return self.extraction_stats
+        # Return paths to report files
+        return str(self.session_file), str(csv_file)

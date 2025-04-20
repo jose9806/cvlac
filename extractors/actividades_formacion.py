@@ -172,7 +172,8 @@ class ActividadesFormacion:
 
             for i in range(len(lis)):
                 try:
-                    data = {"nro": cod_rh}
+                    # Fix: Use cvlac_id instead of nro
+                    data = {"cvlac_id": cod_rh}
 
                     # Extraer información del elemento li
                     data["chulo"] = "SI" if lis[i].find("img") else "NO"
@@ -239,10 +240,11 @@ class ActividadesFormacion:
                         )
                     if len(temp) > 2:
                         try:
-                            data["fecha_inicio"] = int(temp[2].replace(",", ""))
+                            year_str = temp[2].replace(",", "").replace(".", "").strip()
+                            data["fecha_inicio"] = int(year_str)
                         except (ValueError, TypeError):
                             module_logger.warning(
-                                f"No se pudo convertir la fecha de inicio a entero: {temp[2]}"
+                                f"No se pudo convertir el año a entero después de limpiar: {temp[2]}"
                             )
 
                     data["coautores"] = ", ".join(

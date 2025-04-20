@@ -30,7 +30,7 @@ class DatabaseConnection:
             "password": db_config.get("password", "root"),
             "host": db_config.get("host", "localhost"),
             "port": db_config.get("port", "5432"),
-            "database": db_config.get("database", "scrap"),
+            "database": db_config.get("database", "cvlac_db"),
         }
 
         # Para debug

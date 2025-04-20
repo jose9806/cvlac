@@ -188,11 +188,15 @@ class CvlacScraper:
         """
         connection = None
         report_path = None
+
         try:
             main_logger.info(f"Iniciando extracción para CvLAC: {cod_rh}")
 
             # Iniciar nueva extracción para estadísticas
-            start_extraction()
+            from validators import DataValidator
+
+            validator = DataValidator(db)
+            validator.start_new_extraction()
 
             # Obtener conexión a la base de datos
             connection = db.get_connection()
@@ -211,13 +215,23 @@ class CvlacScraper:
                     main_logger.warning(
                         f"Error al obtener CvLAC {cod_rh}. Status: {response.status_code}"
                     )
+                    validator.record_extraction_result(
+                        cod_rh,
+                        success=False,
+                        error=f"HTTP Status {response.status_code}",
+                    )
                     return None
 
                 html = BeautifulSoup(response.content, "lxml")
 
                 # Verificar si hay suficientes tablas
-                if len(html.findAll("table")) <= 2:  # type: ignore
+                if len(html.find_all("table")) <= 2:  # Use find_all instead of findAll
                     main_logger.warning(f"CvLAC {cod_rh} no tiene suficientes tablas")
+                    validator.record_extraction_result(
+                        cod_rh,
+                        success=False,
+                        error="No hay suficientes tablas en el CvLAC",
+                    )
                     return None
 
                 # Eliminar datos previos si se está realizando una actualización completa
@@ -229,6 +243,9 @@ class CvlacScraper:
                 if not nombre_completo:
                     main_logger.warning(
                         f"No se pudo extraer identificación para CvLAC {cod_rh}"
+                    )
+                    validator.record_extraction_result(
+                        cod_rh, success=False, error="No se pudo extraer identificación"
                     )
                     return None
 
@@ -264,7 +281,7 @@ class CvlacScraper:
             self.processed_ids.add(cod_rh)
 
             # Generar reporte de extracción
-            report_path = finish_extraction(cod_rh)
+            report_path = validator.finish_extraction(cod_rh)
             main_logger.info(f"Extracción completada para CvLAC: {cod_rh}")
             main_logger.info(f"Reporte generado en: {report_path}")
 
@@ -273,6 +290,14 @@ class CvlacScraper:
                 f"Error general en extract_cvlac para {cod_rh}: {str(ex)}",
                 exc_info=True,
             )
+            # Intentar registrar el error
+            try:
+                if "validator" in locals():
+                    validator.record_extraction_result(
+                        cod_rh, success=False, error=str(ex)
+                    )
+            except:
+                pass
 
         finally:
             if connection:
@@ -420,6 +445,10 @@ def main():
         "--report_dir",
         help="Directorio para almacenar los reportes de extracción",
     )
+    # Add new argument for session ID
+    parser.add_argument(
+        "--session-id", help="ID de sesión para agrupar reportes (opcional)"
+    )
 
     args = parser.parse_args()
 
@@ -449,63 +478,71 @@ def main():
             print("❌ No se pudo conectar a la base de datos")
         return
 
+    # Initialize data validator with session ID
+    from validators import DataValidator
+
+    validator = DataValidator(db)
+    session_id = (
+        args.session_id
+        or f"session_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    )
+    validator.start_new_extraction(session_id)
+
     scraper = CvlacScraper()
     all_reports = []
 
-    # Modo de ejecución: un solo CvLAC
-    if args.cod_rh:
-        main_logger.info(f"Extrayendo información para CvLAC: {args.cod_rh}")
-        report_path = scraper.extract_cvlac(args.cod_rh)
-        if report_path:
-            all_reports.append(report_path)
-            main_logger.info(f"Reporte generado: {report_path}")
+    try:
+        # Modo de ejecución: un solo CvLAC
+        if args.cod_rh:
+            main_logger.info(f"Extrayendo información para CvLAC: {args.cod_rh}")
+            report_path = scraper.extract_cvlac(args.cod_rh)
+            if report_path:
+                all_reports.append(report_path)
+                main_logger.info(f"Reporte generado: {report_path}")
 
-    # Modo de ejecución: multiprocesamiento
-    elif args.multiprocess:
-        main_logger.info(f"Iniciando extracción con {args.workers} workers")
+        # Modo de ejecución: multiprocesamiento
+        elif args.multiprocess:
+            main_logger.info(f"Iniciando extracción con {args.workers} workers")
 
-        parts = list(range(args.range_start, args.range_end, args.step))
+            parts = list(range(args.range_start, args.range_end, args.step))
 
-        if args.workers > 1:
-            with Pool(args.workers) as pool:
-                results = pool.map(process_range_wrapper, parts)
-                # Aplanar la lista de resultados
-                for reports in results:
+            if args.workers > 1:
+                with Pool(args.workers) as pool:
+                    results = pool.map(process_range_wrapper, parts)
+                    # Aplanar la lista de resultados
+                    for reports in results:
+                        if reports:
+                            all_reports.extend(reports)
+            else:
+                for start_id in parts:
+                    reports = process_range_wrapper(start_id)
                     if reports:
                         all_reports.extend(reports)
+
+        # Modo por defecto: un solo proceso, todos los rangos
         else:
-            for start_id in parts:
-                reports = process_range_wrapper(start_id)
+            main_logger.info("Iniciando extracción en modo single-process")
+
+            for start_id in range(args.range_start, args.range_end, args.step):
+                reports = scraper.process_range(start_id, args.step)
                 if reports:
                     all_reports.extend(reports)
 
-    # Modo por defecto: un solo proceso, todos los rangos
-    else:
-        main_logger.info("Iniciando extracción en modo single-process")
+        # Finalizar la sesión y generar reportes finales
+        summary_paths = validator.finish_session()
+        if summary_paths:
+            main_logger.info(
+                f"Extracción completada. Reportes: {', '.join(summary_paths)}"
+            )
+        else:
+            main_logger.info(
+                "Extracción completada. No se generaron reportes de sesión."
+            )
 
-        for start_id in range(args.range_start, args.range_end, args.step):
-            reports = scraper.process_range(start_id, args.step)
-            if reports:
-                all_reports.extend(reports)
-
-    # Generar un reporte final con todos los resultados
-    if all_reports:
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        final_report = os.path.join(
-            "temp", "reports", f"extraccion_completa_{timestamp}.txt"
-        )
-
-        with open(final_report, "w") as f:
-            f.write(f"REPORTE FINAL DE EXTRACCIÓN\n")
-            f.write(f"=========================\n\n")
-            f.write(f"Fecha de finalización: {datetime.datetime.now().isoformat()}\n")
-            f.write(f"Total de reportes generados: {len(all_reports)}\n\n")
-            f.write("Reportes individuales:\n")
-            for report in all_reports:
-                f.write(f"- {report}\n")
-
-        main_logger.info(f"Reporte final generado en: {final_report}")
-        print(f"Extracción completada. Reporte final: {final_report}")
+    except Exception as e:
+        main_logger.error(f"Error en el proceso principal: {str(e)}")
+        # Even on error, finalize the session
+        validator.finish_session()
 
 
 if __name__ == "__main__":

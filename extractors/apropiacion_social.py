@@ -260,15 +260,7 @@ class ApropiacionSocial:
 
     @staticmethod
     def extract_eventos_cientificos(cod_rh, h3, nombre_completo, connection):
-        """
-        Extrae información sobre eventos científicos.
-
-        Args:
-            cod_rh (str): Código del investigador.
-            h3 (BeautifulSoup): Elemento HTML que contiene la información.
-            nombre_completo (str): Nombre completo del investigador.
-            connection: Conexión a la base de datos.
-        """
+        """Extrae información sobre eventos científicos."""
         try:
             table = h3.parent.parent.parent
 
@@ -305,24 +297,33 @@ class ApropiacionSocial:
                     # Extraer datos del evento
                     ApropiacionSocial._extract_datos_evento(trs[0], data)
 
-                    # Extraer participantes
-                    ApropiacionSocial._extract_participantes_evento(
-                        trs[3], data, nombre_completo, connection
-                    )
+                    # Insertar el evento principal en la base de datos y verificar resultado
+                    result = insert_data("eventos_cientificos", data, connection)
 
-                    # Extraer productos
-                    ApropiacionSocial._extract_productos_evento(
-                        trs[1], data, connection
-                    )
+                    # Solo proceder con los datos relacionados si el evento principal se insertó correctamente
+                    if result in ["insert", "update"]:
+                        # Extraer participantes
+                        ApropiacionSocial._extract_participantes_evento(
+                            trs[3], data, nombre_completo, connection
+                        )
 
-                    # Extraer instituciones
-                    ApropiacionSocial._extract_instituciones_evento(
-                        trs[2], data, connection
-                    )
+                        # Extraer productos
+                        ApropiacionSocial._extract_productos_evento(
+                            trs[1], data, connection
+                        )
 
-                    # Insertar en la base de datos
-                    insert_data("eventos_cientificos", data, connection)
-                    module_logger.debug(f"Evento científico insertado para {cod_rh}")
+                        # Extraer instituciones
+                        ApropiacionSocial._extract_instituciones_evento(
+                            trs[2], data, connection
+                        )
+
+                        module_logger.debug(
+                            f"Evento científico insertado para {cod_rh}"
+                        )
+                    else:
+                        module_logger.warning(
+                            f"No se pudo insertar evento científico para {cod_rh}, omitiendo registros relacionados"
+                        )
                 except Exception as ex:
                     module_logger.error(
                         f"Error procesando evento científico para {cod_rh}: {str(ex)}",
