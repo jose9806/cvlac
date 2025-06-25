@@ -12,5 +12,20 @@
     "database": "scrap_db",
     "user": "postgres",
     "password": "postgres"
-  }
+  },
+  "tables_to_backup": [
+    "cvlac:articulos",
+    "cvlac:libros",
+    "cvlac:capitulos_libro",
+    "cvlac:software",
+    "cvlac:proyectos",
+    "cvlac:trabajos_dirigidos",
+    "gruplac:articulos_publicados",
+    "gruplac:libros_publicados",
+    "gruplac:capitulos_libro",
+    "gruplac:softwares",
+    "gruplac:proyectos",
+    "gruplac:trabajos_dirigidos"
+  ],
+  "log_level": "INFO"
 }

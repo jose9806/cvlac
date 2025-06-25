@@ -35,8 +35,7 @@ import requests
 import datetime
 import urllib3
 import os
-import json
-import sys
+
 
 # Configurar el logger
 logger = ProjectLogger()
